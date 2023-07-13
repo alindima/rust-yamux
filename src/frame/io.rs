@@ -45,30 +45,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
 /// The stages of writing a new `Frame`.
 enum WriteState {
     Init,
-    Header {
-        header: [u8; header::HEADER_SIZE],
-        buffer: Vec<u8>,
-        offset: usize,
-    },
-    Body {
-        buffer: Vec<u8>,
-        offset: usize,
-    },
+    Writing { bytes: Vec<u8>, offset: usize },
 }
 
 impl fmt::Debug for WriteState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             WriteState::Init => f.write_str("(WriteState::Init)"),
-            WriteState::Header { offset, .. } => {
-                write!(f, "(WriteState::Header (offset {}))", offset)
-            }
-            WriteState::Body { offset, buffer } => {
+            WriteState::Writing { offset, bytes } => {
                 write!(
                     f,
-                    "(WriteState::Body (offset {}) (buffer-len {}))",
+                    "(WriteState::Writing (offset {}) (buffer-len {}))",
                     offset,
-                    buffer.len()
+                    bytes.len()
                 )
             }
         }
@@ -84,40 +73,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
             log::trace!("{}: write: {:?}", this.id, this.write_state);
             match &mut this.write_state {
                 WriteState::Init => return Poll::Ready(Ok(())),
-                WriteState::Header {
-                    header,
-                    buffer,
+                WriteState::Writing {
+                    bytes,
                     ref mut offset,
-                } => match Pin::new(&mut this.io).poll_write(cx, &header[*offset..]) {
+                } => match Pin::new(&mut this.io).poll_write(cx, &bytes[*offset..]) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Ready(Ok(n)) => {
+                        println!("Written {n} bytes");
                         if n == 0 {
                             return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                         }
                         *offset += n;
-                        if *offset == header.len() {
-                            if buffer.len() > 0 {
-                                let buffer = std::mem::take(buffer);
-                                this.write_state = WriteState::Body { buffer, offset: 0 };
-                            } else {
-                                this.write_state = WriteState::Init;
-                            }
-                        }
-                    }
-                },
-                WriteState::Body {
-                    buffer,
-                    ref mut offset,
-                } => match Pin::new(&mut this.io).poll_write(cx, &buffer[*offset..]) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                    Poll::Ready(Ok(n)) => {
-                        if n == 0 {
-                            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-                        }
-                        *offset += n;
-                        if *offset == buffer.len() {
+                        if *offset == bytes.len() {
                             this.write_state = WriteState::Init;
                         }
                     }
@@ -127,11 +95,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
     }
 
     fn start_send(self: Pin<&mut Self>, f: Frame<()>) -> Result<(), Self::Error> {
-        let header = header::encode(&f.header);
-        let buffer = f.body;
-        self.get_mut().write_state = WriteState::Header {
-            header,
-            buffer,
+        self.get_mut().write_state = WriteState::Writing {
+            bytes: f.encode(),
             offset: 0,
         };
         Ok(())

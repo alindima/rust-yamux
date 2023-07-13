@@ -18,6 +18,8 @@ use std::{convert::TryInto, num::TryFromIntError};
 pub use io::FrameDecodeError;
 pub(crate) use io::Io;
 
+use self::header::HEADER_SIZE;
+
 /// A Yamux message frame consisting of header and body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame<T> {
@@ -55,6 +57,20 @@ impl<T> Frame<T> {
             header: self.header.left(),
             body: self.body,
         }
+    }
+
+    pub fn encode(self) -> Vec<u8> {
+        let mut buffer = Vec::with_capacity(self.body.len() + HEADER_SIZE);
+        buffer.resize(HEADER_SIZE, 0);
+        buffer[0] = self.header.version().val();
+        buffer[1] = self.header.tag() as u8;
+        buffer[2..4].copy_from_slice(&self.header.flags().val().to_be_bytes());
+        buffer[4..8].copy_from_slice(&self.header.stream_id().val().to_be_bytes());
+        buffer[8..HEADER_SIZE].copy_from_slice(&self.header.len().val().to_be_bytes());
+
+        buffer.extend(self.body);
+
+        buffer
     }
 }
 
